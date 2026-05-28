@@ -4,18 +4,49 @@ services:
     container_name: redis
     ports:
       - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
-      timeout: 3s
-      retries: 5
 
-  worker:
-    build: ./worker
+  api:
+    build: ./fast-image-sse
+    container_name: api
+    ports:
+      - "8000:8000"
     environment:
       REDIS_HOST: redis
-    deploy:
-      replicas: 2
     depends_on:
-      redis:
-        condition: service_healthy
+      - redis
+
+  worker-resize:
+    build: ./worker-sqs
+    environment:
+      REDIS_HOST: redis
+      WORKER_TYPE: resize
+      SQS_URL: https://sqs.us-east-1.amazonaws.com/544295977234/MyQueue-resize
+    depends_on:
+      - redis
+
+  worker-thumbnail:
+    build: ./worker-sqs
+    environment:
+      REDIS_HOST: redis
+      WORKER_TYPE: thumbnail
+      SQS_URL: https://sqs.us-east-1.amazonaws.com/544295977234/MyQueue-thumbnail
+    depends_on:
+      - redis
+
+  worker-filter:
+    build: ./worker-sqs
+    environment:
+      REDIS_HOST: redis
+      WORKER_TYPE: filter
+      SQS_URL: https://sqs.us-east-1.amazonaws.com/544295977234/MyQueue-filter
+    depends_on:
+      - redis
+
+  worker-convert:
+    build: ./worker-sqs
+    environment:
+      REDIS_HOST: redis
+      WORKER_TYPE: convert
+      SQS_URL: https://sqs.us-east-1.amazonaws.com/544295977234/MyQueue-convert
+    depends_on:
+      - redis

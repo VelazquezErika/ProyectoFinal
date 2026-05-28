@@ -1,24 +1,289 @@
 <!DOCTYPE html>
-<html>
+<html lang="es">
 <head>
-    <title>FastAPI Demo</title>
-</head>
-<body>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Processor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
+        body {
+            min-height: 100vh;
+            background: #f5f5f5;
+            font-family: Arial, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px 16px;
+        }
 
-<h1>Sube imagen a S3</h1>
-   <h2>Selecciona el archivo a subir (.jpg):</h2>
+        .card {
+            background: #ffffff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 32px 28px;
+            width: 100%;
+            max-width: 480px;
+        }
 
-     <input id="fileInput" type="file" accept="image/jpg" />
+        h1 {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: #111;
+            margin-bottom: 4px;
+        }
 
-     <div id="message">
-     <div id="original">
-     
-     </div>
+        .subtitle {
+            font-size: 0.85rem;
+            color: #666;
+            margin-bottom: 24px;
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid #e0e0e0;
+            margin-bottom: 20px;
+        }
+
+        .file-label {
+            display: block;
+            font-size: 0.78rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: #444;
+            margin-bottom: 8px;
+        }
+
+        .upload-zone {
+            position: relative;
+            border: 2px dashed #bbb;
+            border-radius: 6px;
+            background: #fafafa;
+            padding: 24px;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .upload-zone:hover  { border-color: #555; background: #f0f0f0; }
+        .upload-zone.dragover { border-color: #222; background: #ebebeb; }
+
+        .upload-zone input[type="file"] {
+            position: absolute;
+            inset: 0;
+            opacity: 0;
+            cursor: pointer;
+            width: 100%;
+            height: 100%;
+        }
+
+        .upload-text { font-size: 0.9rem; font-weight: 600; color: #333; }
+        .upload-hint { font-size: 0.75rem; color: #999; margin-top: 4px; }
+
+        #filename-display {
+            display: block;
+            margin-top: 10px;
+            font-size: 0.8rem;
+            color: #555;
+            font-style: italic;
+            min-height: 18px;
+        }
     
-<p id="status">status</p>
+        #preview-wrap { margin-top: 16px; display: none; }
+        #preview-wrap.visible { display: block; }
 
-<script src="/static/app.js"></script>
+        .section-label {
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: #444;
+            margin-bottom: 6px;
+        }
 
+        #preview-img {
+            max-width: 100%;
+            max-height: 160px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            object-fit: cover;
+            display: block;
+        }
+
+        .status-wrapper { margin-top: 16px; }
+
+        #status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 12px 16px;
+            font-size: 0.88rem;
+            font-weight: 600;
+            color: #333;
+            min-height: 48px;
+            transition: border-color 0.3s, background 0.3s, color 0.3s;
+        }
+
+        #status.processing { border-color: #aaa;  background: #f0f0f0; color: #222; }
+        #status.done       { border-color: #4caf50; background: #f1fdf2; color: #1b5e20; }
+        #status.error-state{ border-color: #f44336; background: #fff5f5; color: #b71c1c; }
+
+        .spinner {
+            width: 18px; height: 18px;
+            border: 2px solid #ccc;
+            border-top-color: #555;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            flex-shrink: 0;
+            display: none;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        #status.processing .spinner { display: block; }
+
+        #workers-section { margin-top: 20px; display: none; }
+        #workers-section.visible { display: block; }
+
+        #workers-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .worker-card {
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 12px 14px;
+            background: #fafafa;
+            transition: border-color 0.3s, background 0.3s;
+        }
+
+        .worker-name {
+            font-size: 0.82rem;
+            font-weight: 700;
+            color: #222;
+            margin-bottom: 4px;
+        }
+
+        .worker-state {
+            font-size: 0.74rem;
+            color: #888;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .worker-dot {
+            width: 7px; height: 7px;
+            border-radius: 50%;
+            background: #ccc;
+            flex-shrink: 0;
+            transition: background 0.3s;
+        }
+
+        .worker-card.processing {
+            border-color: #888;
+            background: #f0f0f0;
+        }
+        .worker-card.processing .worker-dot {
+            background: #555;
+            animation: pulse-dot 1s ease-in-out infinite;
+        }
+        .worker-card.processing .worker-state { color: #444; }
+
+        .worker-card.done {
+            border-color: #4caf50;
+            background: #f1fdf2;
+        }
+        .worker-card.done .worker-dot  { background: #2e7d32; }
+        .worker-card.done .worker-state { color: #1b5e20; }
+        .worker-card.done .worker-name  { color: #1b5e20; }
+
+        .worker-card.error-state {
+            border-color: #f44336;
+            background: #fff5f5;
+        }
+        .worker-card.error-state .worker-dot  { background: #c62828; }
+        .worker-card.error-state .worker-state { color: #b71c1c; }
+
+        @keyframes pulse-dot {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50%       { transform: scale(1.5); opacity: 0.6; }
+        }
+
+        .card-footer {
+            text-align: center;
+            margin-top: 24px;
+            font-size: 0.72rem;
+            color: #bbb;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card">
+
+        <h1>Procesador de Imágenes</h1>
+        <p class="subtitle">Procesamiento distribuido con 4 workers · Docker · Redis · AWS SQS</p>
+
+        <hr>
+
+        <span class="file-label">Selecciona tu archivo (.jpg)</span>
+        <div class="upload-zone" id="dropzone">
+            <input id="fileInput" type="file" accept="image/jpg,image/jpeg" />
+            <div class="upload-text">Arrastra tu imagen aquí</div>
+            <div class="upload-hint">o haz clic para seleccionar · solo JPG</div>
+        </div>
+        <span id="filename-display">Ningún archivo seleccionado</span>
+
+        <div id="preview-wrap">
+            <p class="section-label">Vista previa</p>
+            <img id="preview-img" src="" alt="preview" />
+        </div>
+
+        <div class="status-wrapper">
+            <div id="status">
+                <span class="spinner"></span>
+                <span id="status-text">Esperando imagen...</span>
+            </div>
+        </div>
+
+        <div id="workers-section">
+            <p class="section-label" style="margin-top:20px; margin-bottom:8px;">Estado de workers</p>
+            <div id="workers-grid"></div>
+        </div>
+
+        <p class="card-footer">image processor &mdash; 4 workers en docker</p>
+    </div>
+
+    <script src="/static/app.js"></script>
+    <script>
+        const fileInput       = document.getElementById("fileInput");
+        const filenameDisplay = document.getElementById("filename-display");
+        const previewWrap     = document.getElementById("preview-wrap");
+        const previewImg      = document.getElementById("preview-img");
+        const dropzone        = document.getElementById("dropzone");
+
+        fileInput.addEventListener("change", (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            filenameDisplay.textContent = file.name;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                previewImg.src = ev.target.result;
+                previewWrap.classList.add("visible");
+            };
+            reader.readAsDataURL(file);
+        });
+
+        dropzone.addEventListener("dragover",  (e) => { e.preventDefault(); dropzone.classList.add("dragover"); });
+        dropzone.addEventListener("dragleave", ()  => dropzone.classList.remove("dragover"));
+        dropzone.addEventListener("drop",      ()  => dropzone.classList.remove("dragover"));
+    </script>
 </body>
 </html>
+
