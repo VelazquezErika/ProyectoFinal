@@ -1,173 +1,155 @@
-# Instrucciones de prueba local
+# Procesamiento distribuido Cloud Native con Workers Docker, Message Queues y Cliente en JavaScriptInstrucciones de prueba local
 
-## Estructura del proyecto
+## Procesamiento distribuido de imágenes
+> Se sube una imagen JPG y se observa en tiempo real cómo 4 workers independientes la procesan en paralelo: redimensiona, genera miniatura, aplica filtro gris y convierte a PNG.
+---
 
+## ¿Qué hace?
+Cuando subes una imagen, el sistema:
+1. Genera una URL prefirmada de S3 y sube el archivo directamente desde el navegador.
+2. S3 notifica a SQS (4 colas independientes, una por tipo de tarea).
+3. Cada worker Docker consume su cola, descarga la imagen, la procesa y sube el resultado a S3.
+4. El estado de cada worker se actualiza en Redis en tiempo real.
+5. El frontend recibe actualizaciones vía **Server-Sent Events (SSE)** sin hacer polling.
+---
+
+### Flujo detallado
 ```
-.
-├── worker/
+Usuario sube JPG
+       │
+       ▼
+FastAPI genera URL prefirmada S3
+       │
+       ▼
+Navegador sube directamente a S3 ──► S3 notifica a 4 colas SQS en paralelo
+       │                                          │
+       ▼                               ┌──────────┴──────────┐
+SSE abre conexión                      │ Cada worker (Docker) │
+/events/{filename}                     │  1. Recibe mensaje   │
+       │                               │  2. r.set("en proceso")│
+       ▼                               │  3. Descarga de S3   │
+FastAPI lee Redis                      │  4. Procesa imagen   │
+cada 1 segundo          ◄──────────────│  5. Sube resultado   │
+       │                               │  6. r.set("completada")│
+       ▼                               └─────────────────────┘
+Envía evento al cliente
+(JSON con estado de los 4 workers)
+       │
+       ▼
+UI actualiza cards en tiempo real
+```
+---
+
+## Tecnologías
+| Componente   | Tecnología                              |
+|--------------|-----------------------------------------|
+| API          | FastAPI + Uvicorn                       |
+| Frontend     | HTML/CSS/JS vanilla + SSE               |
+| Message bus  | AWS SQS (long polling 20s)             |
+| Event fan-out| AWS SNS → 4 colas SQS                  |
+| Object store | AWS S3 (presigned POST)                 |
+| State store  | Redis (key: `filename:worker`)          |
+| Image proc.  | Pillow (PIL)                            |
+| Containers   | Docker + Docker Compose                 |
+---
+
+##  Estructura del proyecto
+```
+worker-redis-image/
+├── docker-compose.yml
+│
+├── fast-image-sse/          # Backend FastAPI + Frontend
 │   ├── Dockerfile
-│   ├── requirements.txt
-│   └── worker.py
-├── images/
-│   ├── a.y.-jackson_wilderness-deese-bay.jpg
-│   ├── caravaggio_boy-with-a-basket-of-fruit.jpg
-│   └── ... (98 imágenes más)
-├── enqueue_images.py
-├── s3image.py
-└── instrucciones.md
+│   ├── app.py               # API, SSE, presigned URLs
+│   ├── static/
+│   │   └── app.js           # Lógica del cliente, SSE consumer
+│   └── templates/
+│       └── index.html       # UI completa
+│
+└── worker-sqs/              # Workers de procesamiento
+    ├── Dockerfile
+    ├── worker.py            # Loop SQS, manejo de señales
+    └── s3image.py           # Operaciones Pillow + S3
 ```
-
 ---
 
-# Parte 1: Docker manual (entender los pasos)
-
-## 1. Construir la imagen del worker
-
-```bash
-docker build -t my-worker worker/
+## Arquitectura
 ```
-
-## 2. Lanzar Redis
-
-```bash
-docker run -d --name redis -p 6379:6379 redis:alpine
+┌─────────────────────────────────────────────────────────────────┐
+│                          NAVEGADOR                              │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  React UI  ──► POST /api/presigned-post                  │   │
+│  │             ──► PUT S3 (direct upload)                   │   │
+│  │             ◄── GET /events/{filename}  (SSE stream)     │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└────────────────────────────────┬────────────────────────────────┘
+                                 │
+                    ┌────────────▼────────────┐
+                    │   FastAPI (Docker)       │
+                    │   • /api/presigned-post  │
+                    │   • /events/{filename}   │
+                    │     StreamingResponse    │
+                    └──────┬──────────┬────────┘
+                           │          │
+              ┌────────────▼─┐    ┌───▼──────────────┐
+              │  Redis       │    │   AWS S3          │
+              │  (estado de  │    │   velazquez-      │
+              │   workers)   │    │   objects         │
+              └────────────┬─┘    └───┬───────────────┘
+                           │          │ S3 Event Notification
+                           │          │
+                           │    ┌─────▼──────────────────────┐
+                           │    │         AWS SQS             │
+                           │    │  ┌──────┐ ┌─────────┐      │
+                           │    │  │Queue │ │  Queue  │      │
+                           │    │  │resize│ │thumbnail│      │
+                           │    │  └──┬───┘ └────┬────┘      │
+                           │    │  ┌──┴───┐ ┌────┴────┐      │
+                           │    │  │Queue │ │  Queue  │      │
+                           │    │  │filter│ │ convert │      │
+                           │    │  └──┬───┘ └────┬────┘      │
+                           │    └─────┼──────────┼───────────┘
+                           │          │          │
+              ┌────────────┴──────────┼──────────┼──────────┐
+              │          Workers Docker (×4)                  │
+              │  ┌────────┐ ┌───────┐ ┌────────┐ ┌────────┐ │
+              │  │ resize │ │ thumb │ │ filter │ │convert │ │
+              │  │worker  │ │worker │ │worker  │ │worker  │ │
+              │  └────────┘ └───────┘ └────────┘ └────────┘ │
+              └───────────────────────────────────────────────┘
 ```
-
-## 3. Lanzar uno o varios workers
-
-```bash
-# Worker 1
-## En caso de utilizar Docker Desktop
-docker run -d --name worker1 -e REDIS_HOST=host.docker.internal my-worker
-## En caso de utilizar Linux (o instancia de AWS)
-docker run -d --name worker1 -e REDIS_HOST=<IP-PRIVADA>
-
-# Worker 2 (opcional, para probar concurrencia)
-docker run -d --name worker2 -e REDIS_HOST=host.docker.internal my-worker
-```
-
-Ver logs:
-```bash
-docker logs -f worker1
-docker logs -f worker2
-```
-
-## 4. Encolar imágenes de prueba a Redis
-
-Ver el directorio con imágenes:
-Si quieres cargar más imágenes esta es una muestra tomada de [Kaggle](https://www.kaggle.com/datasets/steubk/wikiart?resource=download).
-
-```bash
-ls images
-```
-
-Ejecutar el enqueuer (necesita la librería `redis` y Redis funcionando):
-
-### Opción A: Con Python local
-```bash
-export REDIS_HOST=localhost
-python enqueue_images.py images/
-```
-
-### Opción B: Con Docker (si no tienes Python local)
-```bash
-docker run --rm \
-  -e REDIS_HOST=host.docker.internal \
-  -v "$(pwd)/images:/images" \
-  -v "$(pwd)/enqueue_images.py:/enqueue_images.py" \
-  python:3.12-slim \
-  bash -c "pip install redis && python /enqueue_images.py /images"
-```
-
-## 5. Verificar que los workers procesaron las mensajes
-
-```bash
-docker logs worker1
-docker logs worker2
-```
-
-Deberías ver mensajes como:
-```
-Imagen "foto1.jpg" procesada exitosamente
-Imagen "foto2.png" procesada exitosamente
-```
-
-## 6. Detener todo
-
-```bash
-docker stop worker1 worker2 redis
-docker rm worker1 worker2 redis
-```
-
-## Otros comandos de Docker para detener y eliminar contenedores
-
-Detener y remover a un contenedore en ejecución
-
-```bash
-docker rm -f nombre_contenedor
-```
-
-Crear un contenedor efímero 
-
-```bash
-docker run --rm redis
-```
-
-Eliminar todos los contenedores
-
-```bash
-docker container prune -f
-```
-
-## Notas (Docker manual)
-
-- `host.docker.internal` permite que los contenedores se conecten a servicios en la máquina host (Redis en `localhost:6379`).
-- En Linux, si `host.docker.internal` no funciona, usa la IP de la máquina host o `--network host`.
-- El worker maneja `SIGTERM` correctamente, así que `docker stop` lo detiene limpiamente.
-
-
-
-
-
 ---
 
-# Parte 2: Docker Compose (automatizar)
 
-Después de entender los pasos manuales, usa Docker Compose para levantar todo con un solo comando.
+# Evidencias de ejecución distribuida
 
-## 1. Lanzar todo
+### 1. Interfaz principal del sistema 
+Los 4 workers actualizan su estado independientemente conforme terminan.
 
-```bash
-docker compose up -d
-```
+<img width="366" height="571" alt="image" src="https://github.com/user-attachments/assets/abc1f5f6-47b5-44b9-af66-51192c92611d" />
 
-Esto levanta:
-- **Redis** en el puerto 6379
-- **2 workers** que consumen de la cola
 
-Ver logs:
-```bash
-docker compose logs -f worker
-```
+### 2. Monitoreo en tiempo real con SSE
+La consola del navegador muestra los eventos SSE enviados desde FastAPI. Cada worker actualiza su estado en Redis y el frontend recibe:
+- pendiente
+- en proceso
+- completada
+- 
+<img width="1003" height="371" alt="image" src="https://github.com/user-attachments/assets/919a1278-877f-4e8b-be8a-fffd160a9b46" />
 
-## 2. Encolar imágenes
 
-Igual que en la Parte 1 (Opción A o B).
+### 3. Almacenamiento en AWS S3
+Las imágenes originales y procesadas son almacenadas automáticamente en diferentes carpetas dentro del bucket S3:
+- imagenes/
+- resize/
+- thumbnail/
+- gray/
+- convert/
+  
+<img width="1112" height="355" alt="image" src="https://github.com/user-attachments/assets/06265d3d-2bcb-44e5-88e7-90bb4a424602" />
 
-## 3. Escalar workers (opcional)
+### 4. Resultado generado por el worker convert
+El worker `convert` transforma automáticamente imágenes JPG a PNG y almacena el resultado en AWS S3.
 
-```bash
-docker compose up -d --scale worker=5
-```
+<img width="1096" height="290" alt="image" src="https://github.com/user-attachments/assets/5c52aa89-9a99-49b0-82d9-d5a2a430aa87" />
 
-## 4. Detener todo
-
-```bash
-docker compose down
-```
-
-## Notas (Docker Compose)
-
-- Los workers se conectan a Redis por el nombre de servicio (`REDIS_HOST=redis`), gracias a la red interna de Docker Compose. No hace falta `host.docker.internal`.
-- El `depends_on` con `condition: service_healthy` espera a que Redis esté listo antes de arrancar los workers.
-- El worker sigue teniendo su loop de reconexión como respaldo.
